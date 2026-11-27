@@ -21,7 +21,9 @@ if (!TOKEN_SECRET || TOKEN_SECRET.length < 32) {
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
+  ssl: {
+    rejectUnauthorized: true
+  },
   max: 5,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 15000
