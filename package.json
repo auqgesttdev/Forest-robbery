@@ -1,8 +1,8 @@
 {
   "name": "forest-robber-server",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "private": true,
-  "description": "Forest Robber game server with accounts, persistent profiles and Socket.IO multiplayer",
+  "description": "Forest Robber game server with Neon PostgreSQL accounts and Socket.IO multiplayer",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -11,7 +11,7 @@
     "node": ">=18.18.0"
   },
   "dependencies": {
-    "better-sqlite3": "^11.7.0",
+    "pg": "^8.13.1",
     "socket.io": "^4.7.5"
   }
 }
