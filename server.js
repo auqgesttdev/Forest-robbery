@@ -496,7 +496,18 @@ io.on('connection', socket => {
       const target = room && room.players[String(data.targetId || '')];
       if (!target) return;
       const targetSocket = io.sockets.sockets.get(target.id);
-      if (data.action === 'giveCoins') {
+      if (data.action === 'teleportToAdmin') {
+        if (!self || !targetSocket) return;
+        target.x = Math.max(30, Math.min(4970, self.x + 45));
+        target.y = Math.max(30, Math.min(4970, self.y + 45));
+        targetSocket.emit('adminTeleport', { x: target.x, y: target.y });
+        io.to(socket.roomId).emit('playerMoved', { id: target.id, ...target });
+        return;
+      } else if (data.action === 'giveItem') {
+        const allowedItems = new Set(['givePistol','giveVehicles','giveWood']);
+        if (allowedItems.has(data.item) && targetSocket) targetSocket.emit('adminGift', { item: data.item });
+        return;
+      } else if (data.action === 'giveCoins') {
         const amount = boundedInt(data.amount, 1, 10000, 100);
         await pool.query('UPDATE users SET coins=LEAST(coins + $1, 100000000) WHERE id=$2', [amount, target.userId]);
         const updated = publicProfile(await findUserById(target.userId));
