@@ -21,9 +21,8 @@ if (!TOKEN_SECRET || TOKEN_SECRET.length < 32) {
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: true
-  },
+  // Verify the database server certificate instead of accepting any certificate.
+  ssl: { rejectUnauthorized: true },
   max: 5,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 15000
@@ -193,7 +192,8 @@ function detachFromRoom(socket) {
   }
   socket.leave(socket.roomId);
   socket.roomId = null;
-    }
+}
+
 const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, { 'Vary': 'Origin', 'Access-Control-Allow-Origin': corsOrigin(req), 'Access-Control-Allow-Headers': 'Content-Type, Authorization', 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS' });
@@ -341,11 +341,11 @@ const server = http.createServer(async (req, res) => {
     if (!res.headersSent) sendJson(res, 500, { error: 'Внутренняя ошибка сервера' });
   }
 });
+
 const io = new Server(server, {
   cors: { origin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',').map(x => x.trim()) : '*', methods: ['GET', 'POST'] },
   maxHttpBufferSize: 1e5
 });
-
 io.use(async (socket, next) => {
   try {
     const user = await verifyToken(socket.handshake.auth && socket.handshake.auth.token);
@@ -377,7 +377,7 @@ io.on('connection', socket => {
       if (!profileRow) return socket.emit('roomError', { message: 'Аккаунт не найден' });
       const profile = publicProfile(profileRow);
       socket.join(roomId); socket.roomId = roomId;
-      room.players[socket.id] = { id: socket.id, userId: uid, nickname: profile.nickname, skin: profile.currentSkin, x: 1750, y: 1750, dir: 0, hp: 100, moving: false };
+      room.players[socket.id] = { id: socket.id, userId: uid, nickname: profile.nickname, skin: profile.currentSkin, x: 2500, y: 2500, dir: 0, hp: 100, moving: false, deathAnnounced: false, deathCause: '', damageLockUntil: 0, pvpCooldownAt: 0 };
       socket.emit('roomState', { players: room.players });
       socket.to(roomId).emit('playerJoined', room.players[socket.id]);
     } catch (error) {
@@ -394,12 +394,77 @@ io.on('connection', socket => {
       const num = (v, min, max, fallback) => Number.isFinite(Number(v)) ? Math.max(min, Math.min(max, Number(v))) : fallback;
       p.x = num(data.x, 0, 5000, p.x); p.y = num(data.y, 0, 5000, p.y);
       p.dir = num(data.dir, -Math.PI * 2, Math.PI * 2, p.dir);
-      p.hp = num(data.hp, 0, 100, p.hp);
+      if (Date.now() >= (p.damageLockUntil || 0)) p.hp = num(data.hp, 0, 100, p.hp);
+      if (p.hp > 0) { p.deathAnnounced = false; p.deathCause = ''; }
       p.moving = data.moving === true;
       const profile = await findUserById(uid);
       if (profile) { p.nickname = profile.nickname; p.skin = profile.current_skin; }
       socket.to(socket.roomId).volatile.emit('playerMoved', { ...p });
     } catch (error) { console.error('playerUpdate error:', error); }
+  });
+
+  socket.on('playerDamage', (data = {}) => {
+    try {
+      if (!socket.roomId) return;
+      const room = rooms.get(socket.roomId);
+      const attacker = room && room.players[socket.id];
+      const target = room && room.players[String(data.targetId || '')];
+      if (!attacker || !target || target.id === attacker.id || target.hp <= 0) return;
+      const SAFE_X = 2500, SAFE_Y = 2500, SAFE_R = 230;
+      const inSafe = p => Math.hypot(p.x - SAFE_X, p.y - SAFE_Y) <= SAFE_R;
+      if (inSafe(attacker) || inSafe(target)) return;
+      const kind = data.kind === 'bullet' ? 'bullet' : 'melee';
+      const now = Date.now();
+      const cooldown = kind === 'bullet' ? 180 : 350;
+      if (now - (attacker.pvpCooldownAt || 0) < cooldown) return;
+      const distance = Math.hypot(target.x - attacker.x, target.y - attacker.y);
+      if (kind === 'melee') {
+        if (distance > 100) return;
+        let angle = Math.atan2(target.y - attacker.y, target.x - attacker.x);
+        let diff = Math.abs(angle - attacker.dir);
+        while (diff > Math.PI) diff = Math.abs(diff - Math.PI * 2);
+        if (diff > 0.9) return;
+      } else {
+        if (distance > 850) return;
+        const ix = Number(data.impactX), iy = Number(data.impactY);
+        if (!Number.isFinite(ix) || !Number.isFinite(iy) || Math.hypot(ix-target.x, iy-target.y) > 48) return;
+        const angle = Math.atan2(target.y - attacker.y, target.x - attacker.x);
+        let diff = Math.abs(angle - attacker.dir);
+        while (diff > Math.PI) diff = Math.abs(diff - Math.PI * 2);
+        if (diff > 0.45) return;
+      }
+      attacker.pvpCooldownAt = now;
+      target.damageLockUntil = now + 250;
+      const damage = kind === 'bullet' ? 28 : 20;
+      target.hp = Math.max(0, Math.min(100, Number(target.hp) - damage));
+      target.deathCause = attacker.nickname;
+      const targetSocket = io.sockets.sockets.get(target.id);
+      if (targetSocket) targetSocket.emit('playerDamaged', {
+        targetId: target.id, hp: target.hp, killerNickname: attacker.nickname
+      });
+      if (target.hp <= 0 && !target.deathAnnounced) {
+        target.deathAnnounced = true;
+        io.to(socket.roomId).emit('killFeed', { message: `☠️ ${target.nickname} убит игроком ${attacker.nickname}` });
+      }
+    } catch (error) { console.error('playerDamage error:', error); }
+  });
+
+  socket.on('playerDeath', (data = {}) => {
+    if (!socket.roomId) return;
+    const room = rooms.get(socket.roomId);
+    const p = room && room.players[socket.id];
+    if (!p || p.hp > 0 || p.deathAnnounced) return;
+    p.deathAnnounced = true;
+    const cause = p.deathCause || String(data.cause || 'бот').replace(/[<>]/g, '').slice(0, 40);
+    io.to(socket.roomId).emit('killFeed', { message: `☠️ ${p.nickname} погиб от: ${cause}` });
+  });
+
+  socket.on('playerKill', (data = {}) => {
+    if (!socket.roomId) return;
+    const room = rooms.get(socket.roomId);
+    if (!room || !room.players[socket.id]) return;
+    const target = String(data.target || 'бот').replace(/[<>]/g, '').slice(0, 50);
+    io.to(socket.roomId).emit('killFeed', { message: `⚔️ ${socket.user.nickname} убил: ${target}` });
   });
 
   socket.on('chatMessage', (data = {}) => {
@@ -420,6 +485,14 @@ io.on('connection', socket => {
         return;
       }
       const room = socket.roomId && rooms.get(socket.roomId);
+      const self = room && room.players[socket.id];
+      if (data.action === 'spawnBoss') {
+        if (!room || !self) return socket.emit('adminError', { message: 'Сначала войдите в кооперативную комнату' });
+        const bx = Math.max(100, Math.min(4900, self.x + Math.cos(self.dir || 0) * 360));
+        const by = Math.max(100, Math.min(4900, self.y + Math.sin(self.dir || 0) * 360));
+        io.to(socket.roomId).emit('bossSpawn', { x: bx, y: by, byAdmin: true });
+        return;
+      }
       const target = room && room.players[String(data.targetId || '')];
       if (!target) return;
       const targetSocket = io.sockets.sockets.get(target.id);
